@@ -8,7 +8,7 @@ import test from "node:test";
 import { PROTOCOL_VERSION } from "@agentclientprotocol/sdk";
 
 test("serves ACP initialize over stdio without polluting stdout", async () => {
-  const agentDir = await mkdtemp(join(tmpdir(), "va-agent-ts-"));
+  const agentDir = await mkdtemp(join(tmpdir(), "va-agent-stdio-"));
   try {
     const child = spawn(process.execPath, ["src/main.ts"], {
       cwd: process.cwd(),
@@ -18,7 +18,7 @@ test("serves ACP initialize over stdio without polluting stdout", async () => {
         VIBEAROUND_MODEL_API_KEY: "test-key",
         VIBEAROUND_MODEL_CONFIG: JSON.stringify({
           api: "openai-responses",
-          baseUrl: "http://127.0.0.1:12358/va/local-api/test/va-agent/openai-responses/v1",
+          baseUrl: "https://model-api.example.test/v1",
           model: "test-model",
           provider: "vibearound-test",
         }),

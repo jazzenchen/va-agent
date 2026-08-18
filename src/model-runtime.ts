@@ -23,6 +23,10 @@ const modelConfigSchema = z
     provider: z.string().trim().min(1),
     contextWindow: z.number().int().positive().optional(),
     maxTokens: z.number().int().positive().optional(),
+    input: z.array(z.enum(["text", "image"])).nonempty().optional(),
+    reasoning: z.boolean().optional(),
+    headers: z.record(z.string(), z.string()).optional(),
+    authHeader: z.boolean().optional(),
   })
   .strict()
   .superRefine((config, context) => {
@@ -86,12 +90,14 @@ export async function createModelLaunch(
   modelRuntime.registerProvider(config.provider, {
     api: config.api,
     baseUrl: config.baseUrl,
+    headers: config.headers,
+    authHeader: config.authHeader,
     models: [
       {
         id: config.model,
         name: config.model,
-        reasoning: false,
-        input: ["text"],
+        reasoning: config.reasoning ?? false,
+        input: config.input ?? ["text"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow,
         maxTokens: config.maxTokens ?? Math.min(contextWindow, 16_384),

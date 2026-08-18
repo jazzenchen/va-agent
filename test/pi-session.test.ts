@@ -16,7 +16,7 @@ test("creates a real Pi session without global Pi installation", async () => {
       join(root, "data"),
       {
         api: "openai-responses",
-        baseUrl: "http://127.0.0.1:12358/va/local-api/test/va-agent/openai-responses/v1",
+        baseUrl: "https://model-api.example.test/v1",
         model: "test-model",
         provider: "vibearound-test",
       },

@@ -13,7 +13,7 @@ import {
 
 const validConfig = {
   api: "openai-responses",
-  baseUrl: "http://127.0.0.1:12358/va/local-api/test/va-agent/openai-responses/v1",
+  baseUrl: "https://model-api.example.test/v1",
   model: "test-model",
   provider: "vibearound-test",
 };
@@ -77,6 +77,36 @@ test("registers the configured model and runtime-only API key with Pi", async ()
 
     const auth = await launch.modelRuntime.getAuth(launch.model);
     assert.equal(auth?.auth.apiKey, "test-key");
+  } finally {
+    await rm(agentDir, { recursive: true, force: true });
+  }
+});
+
+test("passes provider headers and model capabilities through to Pi", async () => {
+  const agentDir = await mkdtemp(join(tmpdir(), "va-agent-model-"));
+  try {
+    const launch = await createModelLaunch(
+      agentDir,
+      {
+        ...validConfig,
+        api: "openai-completions",
+        input: ["text", "image"],
+        reasoning: true,
+        headers: { "X-DashScope-AuthType": "openai" },
+        authHeader: true,
+        contextWindow: 1_000_000,
+        maxTokens: 16_384,
+      },
+      "test-key",
+    );
+
+    assert.equal(launch.model.api, "openai-completions");
+    assert.deepEqual(launch.model.input, ["text", "image"]);
+    assert.equal(launch.model.reasoning, true);
+    assert.equal(launch.model.contextWindow, 1_000_000);
+    const provider = launch.modelRuntime.getRegisteredProviderConfig("vibearound-test");
+    assert.deepEqual(provider?.headers, { "X-DashScope-AuthType": "openai" });
+    assert.equal(provider?.authHeader, true);
   } finally {
     await rm(agentDir, { recursive: true, force: true });
   }

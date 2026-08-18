@@ -15,8 +15,8 @@ the client UI; this agent owns Pi sessions, model requests, and coding tools.
 ```sh
 npm ci
 VIBEAROUND_AGENT_DIR=/path/to/data \
-VIBEAROUND_MODEL_CONFIG='{"api":"openai-responses","baseUrl":"http://127.0.0.1:12358/va/local-api/profile/va-agent/openai-responses/v1","model":"model-id","provider":"vibearound-profile"}' \
-VIBEAROUND_MODEL_API_KEY=local-api-token \
+VIBEAROUND_MODEL_CONFIG='{"api":"openai-responses","baseUrl":"https://api.openai.com/v1","model":"model-id","provider":"openai"}' \
+VIBEAROUND_MODEL_API_KEY=provider-api-key \
 npm start
 npm run check
 npm run build
@@ -28,9 +28,11 @@ allows a real `bash` call, restarts the process, loads the transcript, and
 verifies the next model request still contains the prior turn.
 
 `VIBEAROUND_MODEL_CONFIG` is a strict JSON object containing `api`, `baseUrl`,
-`model`, and `provider`. Optional positive integer fields are `contextWindow`
-and `maxTokens`. The API key is passed separately through
-`VIBEAROUND_MODEL_API_KEY` and is kept in Pi's in-memory model runtime.
+`model`, and `provider`; it points straight at the model provider selected in
+the VibeAround profile. Optional fields are `contextWindow`, `maxTokens`,
+`input` (`text` / `image`), `reasoning`, provider `headers`, and `authHeader`,
+matching what Pi's `registerProvider` accepts. The API key is passed separately
+through `VIBEAROUND_MODEL_API_KEY` and is kept in Pi's in-memory model runtime.
 
 ## Implemented scope
 
