@@ -40,17 +40,25 @@ through `VIBEAROUND_MODEL_API_KEY` and is kept in Pi's in-memory model runtime.
   `session/prompt`, and `session/cancel`
 - Pi session creation, persistence, resume, transcript replay, streaming, and
   cancellation
-- A fixed tool set: `read`, `grep`, `find`, `ls`, `bash`, `edit`, and `write`
+- A fixed tool set: `read`, `grep`, `find`, `ls`, `bash`, `edit`, and `write`,
+  plus a built-in `get_session_id` that returns the current session ID
+- MCP over ACP: the agent advertises `mcpCapabilities.acp`, connects to every
+  `type: "acp"` server declared on `session/new` / `session/resume` /
+  `session/load` through `mcp/connect` and `mcp/message` on the same stdio
+  connection, registers the server's tools with Pi under their own names, and
+  forwards calls as `tools/call`. VibeAround declares its `vibearound` server
+  this way; its tools carry a `va_mcp_` prefix.
 - ACP tool-call lifecycle updates for pending, running, completed, and failed
   calls
 
 `read`, `grep`, `find`, and `ls` run without a prompt only when their resolved
 target remains inside the session workspace. Targets outside the workspace
 require permission; VibeAround product data outside its managed `workspaces`
-directory is always denied. `bash`, `edit`, and `write` are blocked before
-execution until the ACP client selects `allow-once`. A rejected, cancelled, or
-failed permission request stays blocked. Project and user Pi extensions are
-disabled, so they cannot add executable tools outside this fixed set.
+directory is always denied. `bash`, `edit`, `write`, and every MCP tool are
+blocked before execution until the ACP client selects `allow-once`; the
+built-in `get_session_id` needs no prompt. A rejected, cancelled, or failed
+permission request stays blocked. Project and user Pi extensions are disabled,
+so they cannot add executable tools outside this fixed set.
 
 Pi transcripts are stored under `$VIBEAROUND_AGENT_DIR/sessions`. A new
 session header is persisted before `session/new` returns, so it remains
@@ -61,7 +69,8 @@ directory, then replays the active branch's user text, agent text/thought, and
 tool-call/result history as ACP updates. `session/resume` reopens the same state
 without replay.
 
-MCP servers and additional workspace directories are rejected explicitly. The
-agent intentionally has no HTTP server, database, UI, or provider registry.
+HTTP and stdio MCP servers and additional workspace directories are rejected
+explicitly; MCP reaches the agent only over ACP. The agent intentionally has no
+HTTP server, database, UI, or provider registry.
 The initial ACP surface accepts text and resource links only; image prompts and
 model reasoning controls are not advertised yet.

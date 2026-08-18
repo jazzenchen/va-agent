@@ -16,9 +16,12 @@ interface AgentHandle {
   permissions: acp.RequestPermissionRequest[];
   timeline: string[];
   updates: acp.SessionNotification[];
+  mcp: string[];
   stderr: () => string;
   exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
 }
+
+const MCP_SERVER_ID = "vibearound";
 
 test("runs a permitted tool and restores its Pi transcript after restart", {
   timeout: 30_000,
@@ -147,6 +150,12 @@ test("runs a permitted tool and restores its Pi transcript after restart", {
       cwd,
       mcpServers: [],
     });
+    // Replayed notifications precede the load response on the wire, but the
+    // client dispatches messages concurrently; wait for the last one to land.
+    await waitFor(() =>
+      second!.updates.some(({ update }) =>
+        update.sessionUpdate === "tool_call_update" && update.status === "completed"
+      ), "session/load replay");
 
     assert.equal(second.permissions.length, 0);
     assert.ok(second.updates.some(({ update }) =>
@@ -365,6 +374,172 @@ test("enforces real read targets through the compiled Pi tool path", {
   }
 });
 
+test("uses VibeAround MCP tools over the ACP connection", {
+  timeout: 30_000,
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "va-agent-mcp-"));
+  const agentDir = join(root, "agent");
+  const cwd = join(root, "workspace");
+  const requests: unknown[] = [];
+  const server = createServer((request, response) => {
+    void (async () => {
+      let body = "";
+      for await (const chunk of request) {
+        body += chunk;
+      }
+      const parsed = JSON.parse(body);
+      requests.push(parsed);
+      // Turn 1: ask for the session id (built-in, auto-allowed). Turn 2: call
+      // the VibeAround tool with it (over ACP, permission-gated). Turn 3: done.
+      const outputs = toolOutputs(parsed);
+      const sessionId = outputs.get("get_session_id");
+      const echoed = outputs.get("va_mcp_echo");
+      if (echoed !== undefined) {
+        sendTextResponse(
+          response,
+          `response-${requests.length}`,
+          echoed === `echo:session-${sessionId}` ? "mcp complete" : `unexpected: ${echoed}`,
+        );
+      } else if (sessionId !== undefined) {
+        sendToolCallResponse(response, `response-${requests.length}`, "va_mcp_echo", {
+          text: `session-${sessionId}`,
+        });
+      } else {
+        sendToolCallResponse(response, `response-${requests.length}`, "get_session_id", {});
+      }
+    })().catch((error) => {
+      if (!response.headersSent) {
+        response.writeHead(500, { "content-type": "application/json" });
+      }
+      response.end(JSON.stringify({ error: { message: String(error) } }));
+    });
+  });
+
+  let agent: AgentHandle | undefined;
+  try {
+    await mkdir(cwd, { recursive: true });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const port = (server.address() as AddressInfo).port;
+    agent = startAgent(agentDir, `http://127.0.0.1:${port}/v1`);
+
+    const initialized = await agent.connection.agent.request(
+      acp.methods.agent.initialize,
+      { protocolVersion: acp.PROTOCOL_VERSION },
+    );
+    assert.equal(initialized.agentCapabilities?.mcpCapabilities?.acp, true);
+
+    await assert.rejects(
+      agent.connection.agent.request(acp.methods.agent.session.new, {
+        cwd,
+        mcpServers: [{ type: "http", name: "other", url: "http://127.0.0.1:1/mcp", headers: [] }],
+      }),
+      /Only MCP servers over ACP/u,
+    );
+
+    const { sessionId } = await agent.connection.agent.request(
+      acp.methods.agent.session.new,
+      {
+        cwd,
+        mcpServers: [{ type: "acp", name: "vibearound", serverId: MCP_SERVER_ID }],
+      },
+    );
+    assert.deepEqual(agent.mcp, [
+      `connect:${MCP_SERVER_ID}`,
+      `conn-${MCP_SERVER_ID}:initialize`,
+      `conn-${MCP_SERVER_ID}:notifications/initialized`,
+      `conn-${MCP_SERVER_ID}:tools/list`,
+    ]);
+
+    const result = await agent.connection.agent.request(
+      acp.methods.agent.session.prompt,
+      { sessionId, prompt: [{ type: "text", text: "use the tools" }] },
+    );
+    assert.equal(result.stopReason, "end_turn");
+    assert.equal(agentText(agent.updates), "mcp complete");
+
+    // Only the VibeAround tool asked for permission; the built-in session
+    // tool is auto-allowed.
+    assert.deepEqual(
+      agent.permissions.map((request) => request.toolCall.name),
+      ["va_mcp_echo"],
+    );
+    assert.equal(agent.mcp.at(-1), `call:va_mcp_echo:session-${sessionId}`);
+    // Pi's own tool_call gate ran, so the ACP client saw the pending update
+    // before the permission prompt, then in_progress, then completed.
+    const echoCallId = agent.permissions[0]?.toolCall.toolCallId;
+    assert.ok(echoCallId);
+    assert.deepEqual(
+      agent.timeline.filter((entry) => entry.endsWith(`:${echoCallId}`)),
+      [
+        `pending:${echoCallId}`,
+        `permission:${echoCallId}`,
+        `in_progress:${echoCallId}`,
+        `completed:${echoCallId}`,
+      ],
+    );
+
+    // Replacing the session in-process disconnects the old MCP connection
+    // (and the reloaded session connects again).
+    await agent.connection.agent.request(acp.methods.agent.session.load, {
+      sessionId,
+      cwd,
+      mcpServers: [{ type: "acp", name: "vibearound", serverId: MCP_SERVER_ID }],
+    });
+    assert.ok(
+      agent.mcp.includes(`disconnect:conn-${MCP_SERVER_ID}`),
+      JSON.stringify(agent.mcp),
+    );
+    assert.equal(
+      agent.mcp.filter((entry) => entry === `connect:${MCP_SERVER_ID}`).length,
+      2,
+    );
+
+    await stopAgent(agent);
+    agent = undefined;
+  } finally {
+    if (agent) {
+      agent.child.kill("SIGKILL");
+      agent.connection.close();
+    }
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// The SDK only ships typed handlers for the stable client methods; the MCP
+// ones take an explicit params parser.
+function passthrough<T>(): acp.ParamsParser<T> {
+  return { parse: (params: unknown) => params as T };
+}
+
+/// Tool outputs the model has received so far, keyed by tool name.
+function toolOutputs(request: unknown): Map<string, string> {
+  const input = (request as { input?: unknown[] }).input ?? [];
+  const names = new Map<string, string>();
+  const outputs = new Map<string, string>();
+  for (const item of input) {
+    const record = item as {
+      type?: string;
+      call_id?: string;
+      name?: string;
+      output?: string;
+    };
+    if (record.type === "function_call" && record.call_id && record.name) {
+      names.set(record.call_id, record.name);
+    }
+    if (record.type === "function_call_output" && record.call_id) {
+      const name = names.get(record.call_id);
+      if (name && typeof record.output === "string") {
+        outputs.set(name, record.output.trim());
+      }
+    }
+  }
+  return outputs;
+}
+
 function startAgent(agentDir: string, baseUrl: string): AgentHandle {
   const binary = process.env.VA_AGENT_TEST_BINARY?.trim();
   const child = spawn(binary || process.execPath, binary ? [] : ["src/main.ts"], {
@@ -389,6 +564,7 @@ function startAgent(agentDir: string, baseUrl: string): AgentHandle {
   const updates: acp.SessionNotification[] = [];
   const permissions: acp.RequestPermissionRequest[] = [];
   const timeline: string[] = [];
+  const mcp: string[] = [];
   const client = acp
     .client({ name: "va-agent-integration-test" })
     .onRequest(acp.methods.client.session.requestPermission, ({ params }) => {
@@ -398,6 +574,70 @@ function startAgent(agentDir: string, baseUrl: string): AgentHandle {
         outcome: { outcome: "selected", optionId: "allow-once" },
       };
     })
+    // The test client plays VibeAround: one MCP server reachable over this
+    // ACP connection, exposing a single echo tool.
+    .onRequest<acp.ConnectMcpRequest, acp.ConnectMcpResponse>(
+      acp.CLIENT_METHODS.mcp_connect,
+      passthrough<acp.ConnectMcpRequest>(),
+      ({ params }) => {
+        mcp.push(`connect:${params.serverId}`);
+        return { connectionId: `conn-${params.serverId}` };
+      },
+    )
+    .onRequest<acp.MessageMcpRequest, acp.MessageMcpResponse>(
+      acp.CLIENT_METHODS.mcp_message,
+      passthrough<acp.MessageMcpRequest>(),
+      ({ params }) => {
+        mcp.push(`${params.connectionId}:${params.method}`);
+        switch (params.method) {
+          case "initialize":
+            return {
+              protocolVersion: "2025-03-26",
+              capabilities: { tools: {} },
+              serverInfo: { name: "vibearound-test", version: "0" },
+            };
+          case "tools/list":
+            return {
+              tools: [{
+                name: "va_mcp_echo",
+                description: "Echo text back through VibeAround.",
+                inputSchema: {
+                  type: "object",
+                  properties: { text: { type: "string" } },
+                  required: ["text"],
+                },
+              }],
+            };
+          case "tools/call": {
+            const args = (params.params as {
+              name: string;
+              arguments: { text: string };
+            });
+            mcp.push(`call:${args.name}:${args.arguments.text}`);
+            return {
+              content: [{ type: "text", text: `echo:${args.arguments.text}` }],
+            };
+          }
+          default:
+            throw acp.RequestError.methodNotFound(params.method);
+        }
+      },
+    )
+    .onNotification<acp.MessageMcpNotification>(
+      acp.CLIENT_METHODS.mcp_message,
+      passthrough<acp.MessageMcpNotification>(),
+      ({ params }) => {
+        mcp.push(`${params.connectionId}:${params.method}`);
+      },
+    )
+    .onRequest<acp.DisconnectMcpRequest, acp.DisconnectMcpResponse>(
+      acp.CLIENT_METHODS.mcp_disconnect,
+      passthrough<acp.DisconnectMcpRequest>(),
+      ({ params }) => {
+        mcp.push(`disconnect:${params.connectionId}`);
+        return {};
+      },
+    )
     .onNotification(acp.methods.client.session.update, ({ params }) => {
       updates.push(params);
       if (params.update.sessionUpdate === "tool_call") {
@@ -423,6 +663,7 @@ function startAgent(agentDir: string, baseUrl: string): AgentHandle {
     permissions,
     timeline,
     updates,
+    mcp,
     stderr: () => stderr,
     exited,
   };
@@ -464,6 +705,45 @@ function sendBashResponse(response: ServerResponse, responseId: string): void {
     id: `function-${responseId}`,
     call_id: `call-${responseId}`,
     name: "bash",
+    arguments: argumentsJson,
+    status: "completed",
+  };
+  sendEvents(response, [
+    createdEvent(responseId),
+    {
+      type: "response.output_item.added",
+      output_index: 0,
+      item: { ...item, arguments: "", status: "in_progress" },
+    },
+    {
+      type: "response.function_call_arguments.delta",
+      item_id: item.id,
+      output_index: 0,
+      delta: argumentsJson,
+    },
+    {
+      type: "response.function_call_arguments.done",
+      item_id: item.id,
+      output_index: 0,
+      arguments: argumentsJson,
+    },
+    { type: "response.output_item.done", output_index: 0, item },
+    completedEvent(responseId, [item]),
+  ]);
+}
+
+function sendToolCallResponse(
+  response: ServerResponse,
+  responseId: string,
+  name: string,
+  args: Record<string, unknown>,
+): void {
+  const argumentsJson = JSON.stringify(args);
+  const item = {
+    type: "function_call",
+    id: `function-${responseId}`,
+    call_id: `call-${responseId}`,
+    name,
     arguments: argumentsJson,
     status: "completed",
   };
@@ -601,6 +881,16 @@ function sendEvents(response: ServerResponse, events: unknown[]): void {
     response.write(`event: ${type}\ndata: ${JSON.stringify(event)}\n\n`);
   }
   response.end();
+}
+
+async function waitFor(condition: () => boolean, what: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (!condition()) {
+    if (Date.now() > deadline) {
+      throw new Error(`timed out waiting for ${what}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 async function withTimeout<T>(

@@ -7,6 +7,7 @@ import test from "node:test";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 
+import type { McpBinding } from "../src/mcp-over-acp.ts";
 import {
   Sessions,
   toolAccess,
@@ -91,11 +92,20 @@ function factoryFor(
 }
 
 const allow = async () => true;
+const noMcp: McpBinding = {
+  servers: [],
+  transport: {
+    connect: () => Promise.reject(new Error("no MCP in this test")),
+    message: () => Promise.reject(new Error("no MCP in this test")),
+    notify: () => Promise.reject(new Error("no MCP in this test")),
+    disconnect: () => Promise.reject(new Error("no MCP in this test")),
+  },
+};
 
 test("creates a session and streams a completed prompt", async () => {
   const fake = new FakeSession();
   const sessions = new Sessions(factoryFor(fake));
-  assert.equal(await sessions.create("/repo", allow), "session-1");
+  assert.equal(await sessions.create("/repo", allow, noMcp), "session-1");
 
   const updates: unknown[] = [];
   const stopReason = await sessions.prompt(
@@ -117,7 +127,7 @@ test("creates a session and streams a completed prompt", async () => {
 test("cancels the active Pi prompt", async () => {
   const fake = new FakeSession();
   const sessions = new Sessions(factoryFor(fake));
-  await sessions.create("/repo", allow);
+  await sessions.create("/repo", allow, noMcp);
 
   const prompting = sessions.prompt(
     "session-1",
@@ -133,7 +143,7 @@ test("cancels the active Pi prompt", async () => {
 test("maps Pi length and error outcomes instead of reporting a blank success", async () => {
   const fake = new FakeSession();
   const sessions = new Sessions(factoryFor(fake));
-  await sessions.create("/repo", allow);
+  await sessions.create("/repo", allow, noMcp);
   fake.runPrompt = async () => {
     fake.emit(assistantEnd("length"));
   };
@@ -161,7 +171,7 @@ test("gates side-effect tools after the pending ACP update with the real session
   await sessions.create("/repo", async (request) => {
     events.push(`permission:${request.sessionId}:${request.toolName}`);
     return true;
-  });
+  }, noMcp);
 
   fake.runPrompt = async () => {
     fake.emit({
@@ -237,7 +247,7 @@ test("does not move a denied side-effect tool to in_progress", async () => {
   const sessions = new Sessions(factoryFor(fake, (gate) => {
     beforeToolCall = gate;
   }));
-  await sessions.create("/repo", async () => false);
+  await sessions.create("/repo", async () => false, noMcp);
 
   fake.runPrompt = async () => {
     fake.emit({
@@ -306,6 +316,14 @@ test("only auto-allows real read-only targets inside the session workspace", asy
       }
       throw error;
     }
+
+    // The built-in session id tool only reports agent state.
+    assert.equal(await toolAccess("get_session_id", {}, cwd, agentDir), "auto_allow");
+    // VibeAround MCP tools are gated like any other side-effect tool.
+    assert.equal(
+      await toolAccess("va_mcp_send_file", { file: "inside.txt" }, cwd, agentDir),
+      "permission",
+    );
 
     for (const [toolName, args] of [
       ["read", { path: "inside.txt" }],
@@ -378,6 +396,7 @@ test("loads a resumed session and replays its history in order", async () => {
     fake.sessionId,
     "/repo",
     allow,
+    noMcp,
     async (update) => {
       replayed.push(update);
     },

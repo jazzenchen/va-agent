@@ -7,7 +7,18 @@ import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 
 import { createModelLaunch } from "../src/model-runtime.ts";
+import type { McpBinding } from "../src/mcp-over-acp.ts";
 import { createPiSessionFactory } from "../src/sessions.ts";
+
+const noMcp: McpBinding = {
+  servers: [],
+  transport: {
+    connect: () => Promise.reject(new Error("no MCP in this test")),
+    message: () => Promise.reject(new Error("no MCP in this test")),
+    notify: () => Promise.reject(new Error("no MCP in this test")),
+    disconnect: () => Promise.reject(new Error("no MCP in this test")),
+  },
+};
 
 test("creates a real Pi session without global Pi installation", async () => {
   const root = await mkdtemp(join(tmpdir(), "va-agent-pi-"));
@@ -27,12 +38,12 @@ test("creates a real Pi session without global Pi installation", async () => {
       launch.modelRuntime,
       launch.model,
     );
-    const session = await factory.create(root, async () => true);
+    const session = await factory.create(root, async () => true, noMcp);
     assert.ok(session.sessionId.length > 0);
     const newSessionId = session.sessionId;
     session.dispose();
 
-    const reopened = await factory.resume(newSessionId, root, async () => true);
+    const reopened = await factory.resume(newSessionId, root, async () => true, noMcp);
     assert.equal(reopened.sessionId, newSessionId);
     assert.deepEqual(reopened.history(), []);
     reopened.dispose();
@@ -61,7 +72,7 @@ test("creates a real Pi session without global Pi installation", async () => {
       stopReason: "stop",
       timestamp: Date.now(),
     });
-    const resumed = await factory.resume("saved-id", root, async () => true);
+    const resumed = await factory.resume("saved-id", root, async () => true, noMcp);
     assert.deepEqual(resumed.history(), [
       {
         sessionUpdate: "user_message_chunk",
@@ -74,7 +85,7 @@ test("creates a real Pi session without global Pi installation", async () => {
     ]);
     resumed.dispose();
     await assert.rejects(
-      factory.resume("saved-id", join(root, "other-cwd"), async () => true),
+      factory.resume("saved-id", join(root, "other-cwd"), async () => true, noMcp),
       /Session not found: saved-id/,
     );
   } finally {

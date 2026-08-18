@@ -9,6 +9,7 @@ import {
   MODEL_CONFIG_ENV,
   readModelEnvironment,
 } from "./model-runtime.ts";
+import { acpMcpTransport, type McpBinding } from "./mcp-over-acp.ts";
 import { toolKind } from "./pi-acp-bridge.ts";
 import { createPiSessionFactory, Sessions } from "./sessions.ts";
 
@@ -77,6 +78,7 @@ const app = acp
     agentCapabilities: {
       loadSession: true,
       sessionCapabilities: { resume: {} },
+      mcpCapabilities: { acp: true },
     },
     agentInfo: {
       name: "va-agent",
@@ -85,12 +87,7 @@ const app = acp
     },
   }))
   .onRequest(acp.methods.agent.session.new, async ({ params, client }) => {
-    if (params.mcpServers.length > 0) {
-      throw acp.RequestError.invalidParams(
-        undefined,
-        "MCP servers are not supported yet",
-      );
-    }
+    const mcp = mcpBinding(client, params.mcpServers);
     if (params.additionalDirectories?.length) {
       throw acp.RequestError.invalidParams(
         undefined,
@@ -101,6 +98,7 @@ const app = acp
       const sessionId = await sessions.create(
         params.cwd,
         permissionRequest(client),
+        mcp,
       );
       return { sessionId };
     } catch (error) {
@@ -108,12 +106,7 @@ const app = acp
     }
   })
   .onRequest(acp.methods.agent.session.resume, async ({ params, client }) => {
-    if (params.mcpServers?.length) {
-      throw acp.RequestError.invalidParams(
-        undefined,
-        "MCP servers are not supported yet",
-      );
-    }
+    const mcp = mcpBinding(client, params.mcpServers ?? []);
     if (params.additionalDirectories?.length) {
       throw acp.RequestError.invalidParams(
         undefined,
@@ -125,6 +118,7 @@ const app = acp
         params.sessionId,
         params.cwd,
         permissionRequest(client),
+        mcp,
       );
       return {};
     } catch (error) {
@@ -132,12 +126,7 @@ const app = acp
     }
   })
   .onRequest(acp.methods.agent.session.load, async ({ params, client }) => {
-    if (params.mcpServers.length > 0) {
-      throw acp.RequestError.invalidParams(
-        undefined,
-        "MCP servers are not supported yet",
-      );
-    }
+    const mcp = mcpBinding(client, params.mcpServers);
     if (params.additionalDirectories?.length) {
       throw acp.RequestError.invalidParams(
         undefined,
@@ -149,6 +138,7 @@ const app = acp
         params.sessionId,
         params.cwd,
         permissionRequest(client),
+        mcp,
         (update) => client.notify(acp.methods.client.session.update, {
           sessionId: params.sessionId,
           update,
@@ -190,6 +180,26 @@ process.once("SIGTERM", () => connection.close());
 
 await connection.closed;
 sessions.dispose();
+
+// Only MCP servers reached over this ACP connection are accepted; the agent
+// has no HTTP or stdio MCP client and does not want one.
+function mcpBinding(
+  client: acp.AgentContext,
+  servers: acp.McpServer[],
+): McpBinding {
+  const acpServers: acp.McpServerAcp[] = [];
+  for (const server of servers) {
+    // Stdio entries carry no `type` tag in the ACP schema.
+    if (!("type" in server) || server.type !== "acp") {
+      throw acp.RequestError.invalidParams(
+        undefined,
+        "Only MCP servers over ACP are supported",
+      );
+    }
+    acpServers.push(server);
+  }
+  return { servers: acpServers, transport: acpMcpTransport(client) };
+}
 
 function internalRequestError(error: unknown): acp.RequestError {
   if (error instanceof acp.RequestError) {

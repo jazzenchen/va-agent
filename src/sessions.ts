@@ -28,13 +28,23 @@ import type {
 } from "@agentclientprotocol/sdk";
 
 import {
+  mcpOverAcpExtension,
+  sessionIdToolExtension,
+  SESSION_ID_TOOL,
+  type McpBinding,
+  type McpOverAcpExtension,
+} from "./mcp-over-acp.ts";
+import {
   eventToSessionUpdate,
   historyToSessionUpdates,
   promptToText,
   toolCallInProgress,
 } from "./pi-acp-bridge.ts";
 
+const BUILT_IN_TOOLS = ["read", "grep", "find", "ls", "bash", "edit", "write"];
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
+// Local tools that only report agent state and never touch the workspace.
+const AUTO_ALLOW_TOOLS = new Set([SESSION_ID_TOOL]);
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/gu;
 
 export type ToolAccess = "auto_allow" | "permission" | "deny";
@@ -61,11 +71,16 @@ export type PermissionRequest = (input: ToolCallRequest) => Promise<boolean>;
 export type BeforeToolCall = (input: ToolCallRequest) => Promise<boolean>;
 
 export interface SessionFactory {
-  create(cwd: string, beforeToolCall: BeforeToolCall): Promise<SessionLike>;
+  create(
+    cwd: string,
+    beforeToolCall: BeforeToolCall,
+    mcp: McpBinding,
+  ): Promise<SessionLike>;
   resume(
     sessionId: string,
     cwd: string,
     beforeToolCall: BeforeToolCall,
+    mcp: McpBinding,
   ): Promise<SessionLike>;
 }
 
@@ -92,12 +107,20 @@ export function createPiSessionFactory(
     cwd: string,
     sessionManager: SessionManager,
     beforeToolCall: BeforeToolCall,
+    mcp: McpBinding,
   ): Promise<SessionLike> => {
+    // Tools our own extensions add on top of the fixed built-in set.
+    const extensionTools = new Set<string>();
+    const vibearoundMcp = mcpOverAcpExtension(mcp, extensionTools);
     const resourceLoader = new DefaultResourceLoader({
       cwd,
       agentDir,
       noExtensions: true,
-      extensionFactories: [permissionExtension(cwd, agentDir, beforeToolCall)],
+      extensionFactories: [
+        permissionExtension(cwd, agentDir, beforeToolCall),
+        sessionIdToolExtension(extensionTools),
+        vibearoundMcp.factory,
+      ],
     });
     await resourceLoader.reload();
     const { session } = await createAgentSession({
@@ -107,20 +130,23 @@ export function createPiSessionFactory(
       modelRuntime,
       resourceLoader,
       sessionManager,
-      tools: ["read", "grep", "find", "ls", "bash", "edit", "write"],
     });
-    return adaptPiSession(session);
+    // Pi's `tools` allowlist would also drop extension tools, so the active
+    // set is pinned here instead: the fixed built-ins plus our own.
+    session.setActiveToolsByName([...BUILT_IN_TOOLS, ...extensionTools]);
+    return adaptPiSession(session, vibearoundMcp);
   };
   return {
-    create(cwd, beforeToolCall) {
+    create(cwd, beforeToolCall, mcp) {
       const resolvedCwd = resolve(cwd);
       return create(
         resolvedCwd,
         durableSessionManager(resolvedCwd, sessionDir),
         beforeToolCall,
+        mcp,
       );
     },
-    async resume(sessionId, cwd, beforeToolCall) {
+    async resume(sessionId, cwd, beforeToolCall, mcp) {
       const resolvedCwd = resolve(cwd);
       const matches = (await SessionManager.list(resolvedCwd, sessionDir)).filter(
         (session) => session.id === sessionId,
@@ -138,7 +164,7 @@ export function createPiSessionFactory(
       ) {
         throw new Error(`Session ${sessionId} does not belong to ${resolvedCwd}`);
       }
-      return create(resolvedCwd, manager, beforeToolCall);
+      return create(resolvedCwd, manager, beforeToolCall, mcp);
     },
   };
 }
@@ -156,14 +182,22 @@ function durableSessionManager(
   return SessionManager.open(sessionFile, sessionDir, cwd);
 }
 
-function adaptPiSession(session: AgentSession): SessionLike {
+function adaptPiSession(
+  session: AgentSession,
+  vibearoundMcp: McpOverAcpExtension,
+): SessionLike {
   return {
     sessionId: session.sessionId,
     subscribe: (listener) => session.subscribe(listener),
     history: () => historyToSessionUpdates(session.sessionManager.getBranch()),
     prompt: (text) => session.prompt(text),
     abort: () => session.abort(),
-    dispose: () => session.dispose(),
+    dispose: () => {
+      session.dispose();
+      // Best effort: when a session is replaced in-process the connection is
+      // live and this lands; at process exit the pipe may already be gone.
+      void vibearoundMcp.disconnect().catch(() => undefined);
+    },
   };
 }
 
@@ -202,6 +236,9 @@ export async function toolAccess(
   cwd: string,
   agentDir: string,
 ): Promise<ToolAccess> {
+  if (AUTO_ALLOW_TOOLS.has(toolName)) {
+    return "auto_allow";
+  }
   if (!READ_ONLY_TOOLS.has(toolName)) {
     return "permission";
   }
@@ -368,9 +405,13 @@ export class Sessions {
     this.#factory = factory;
   }
 
-  async create(cwd: string, requestPermission: PermissionRequest): Promise<string> {
+  async create(
+    cwd: string,
+    requestPermission: PermissionRequest,
+    mcp: McpBinding,
+  ): Promise<string> {
     const bridge = new PromptBridge(requestPermission);
-    const session = await this.#factory.create(cwd, bridge.beforeToolCall);
+    const session = await this.#factory.create(cwd, bridge.beforeToolCall, mcp);
     this.#set(session, bridge);
     return session.sessionId;
   }
@@ -379,12 +420,14 @@ export class Sessions {
     sessionId: string,
     cwd: string,
     requestPermission: PermissionRequest,
+    mcp: McpBinding,
   ): Promise<void> {
     const bridge = new PromptBridge(requestPermission);
     const session = await this.#factory.resume(
       sessionId,
       cwd,
       bridge.beforeToolCall,
+      mcp,
     );
     this.#set(session, bridge);
   }
@@ -393,6 +436,7 @@ export class Sessions {
     sessionId: string,
     cwd: string,
     requestPermission: PermissionRequest,
+    mcp: McpBinding,
     notify: (update: SessionUpdate) => Promise<void>,
   ): Promise<void> {
     const bridge = new PromptBridge(requestPermission);
@@ -400,6 +444,7 @@ export class Sessions {
       sessionId,
       cwd,
       bridge.beforeToolCall,
+      mcp,
     );
     this.#set(session, bridge);
     for (const update of session.history()) {
