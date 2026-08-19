@@ -33,7 +33,9 @@ test("creates a real Pi session without global Pi installation", async () => {
       },
       "test-key",
     );
+    const agentDir = join(root, "data", "agents", "va-agent");
     const factory = createPiSessionFactory(
+      agentDir,
       join(root, "data"),
       launch.modelRuntime,
       launch.model,
@@ -48,7 +50,7 @@ test("creates a real Pi session without global Pi installation", async () => {
     assert.deepEqual(reopened.history(), []);
     reopened.dispose();
 
-    const sessionDir = join(root, "data", "sessions");
+    const sessionDir = join(agentDir, "sessions");
     const saved = SessionManager.create(root, sessionDir, { id: "saved-id" });
     saved.appendMessage({
       role: "user",

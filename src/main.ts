@@ -18,6 +18,11 @@ if (!agentDir) {
   console.error("VIBEAROUND_AGENT_DIR is required");
   process.exit(2);
 }
+const dataDir = process.env.VIBEAROUND_DATA_DIR?.trim();
+if (!dataDir) {
+  console.error("VIBEAROUND_DATA_DIR is required");
+  process.exit(2);
+}
 
 let modelLaunch;
 try {
@@ -33,6 +38,7 @@ try {
 const sessions = new Sessions(
   createPiSessionFactory(
     resolve(agentDir),
+    resolve(dataDir),
     modelLaunch.modelRuntime,
     modelLaunch.model,
   ),

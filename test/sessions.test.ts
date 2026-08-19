@@ -73,6 +73,12 @@ class FakeSession implements SessionLike {
   dispose(): void {
     this.disposed = true;
   }
+
+  closed = false;
+  async close(): Promise<void> {
+    this.closed = true;
+    this.disposed = true;
+  }
 }
 
 function factoryFor(
@@ -318,10 +324,10 @@ test("only auto-allows real read-only targets inside the session workspace", asy
     }
 
     // The built-in session id tool only reports agent state.
-    assert.equal(await toolAccess("get_session_id", {}, cwd, agentDir), "auto_allow");
+    assert.equal(await toolAccess("get_session_id", {}, cwd, dataDir), "auto_allow");
     // VibeAround MCP tools are gated like any other side-effect tool.
     assert.equal(
-      await toolAccess("va_mcp_send_file", { file: "inside.txt" }, cwd, agentDir),
+      await toolAccess("va_mcp_send_file", { file: "inside.txt" }, cwd, dataDir),
       "permission",
     );
 
@@ -332,30 +338,30 @@ test("only auto-allows real read-only targets inside the session workspace", asy
       ["ls", {}],
     ] as const) {
       assert.equal(
-        await toolAccess(toolName, args, cwd, agentDir),
+        await toolAccess(toolName, args, cwd, dataDir),
         "auto_allow",
         toolName,
       );
     }
 
     assert.equal(
-      await toolAccess("read", { path: "../sibling.txt" }, cwd, agentDir),
+      await toolAccess("read", { path: "../sibling.txt" }, cwd, dataDir),
       "permission",
     );
     assert.equal(
-      await toolAccess("read", { path: outside }, cwd, agentDir),
+      await toolAccess("read", { path: outside }, cwd, dataDir),
       "permission",
     );
     assert.equal(
-      await toolAccess("read", { path: outsideLink }, cwd, agentDir),
+      await toolAccess("read", { path: outsideLink }, cwd, dataDir),
       "permission",
     );
     assert.equal(
-      await toolAccess("read", { path: auth }, cwd, agentDir),
+      await toolAccess("read", { path: auth }, cwd, dataDir),
       "deny",
     );
     assert.equal(
-      await toolAccess("read", { path: authLink }, cwd, agentDir),
+      await toolAccess("read", { path: authLink }, cwd, dataDir),
       "deny",
     );
     assert.equal(

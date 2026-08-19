@@ -15,6 +15,7 @@ test("serves ACP initialize over stdio without polluting stdout", async () => {
       env: {
         ...process.env,
         VIBEAROUND_AGENT_DIR: agentDir,
+      VIBEAROUND_DATA_DIR: agentDir,
         VIBEAROUND_MODEL_API_KEY: "test-key",
         VIBEAROUND_MODEL_CONFIG: JSON.stringify({
           api: "openai-responses",

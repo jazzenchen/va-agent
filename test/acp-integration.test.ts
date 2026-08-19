@@ -10,6 +10,8 @@ import test from "node:test";
 
 import * as acp from "@agentclientprotocol/sdk";
 
+import { PI_IDENTITY_SENTENCE, VA_IDENTITY_SENTENCE } from "../src/identity.ts";
+
 interface AgentHandle {
   child: ChildProcessWithoutNullStreams;
   connection: acp.ClientConnection;
@@ -70,7 +72,7 @@ test("runs a permitted tool and restores its Pi transcript after restart", {
     const port = (server.address() as AddressInfo).port;
     const baseUrl = `http://127.0.0.1:${port}/v1`;
 
-    first = startAgent(agentDir, baseUrl);
+    first = startAgent(agentDir, join(root, "data"), baseUrl);
     const initialized = await first.connection.agent.request(
       acp.methods.agent.initialize,
       { protocolVersion: acp.PROTOCOL_VERSION },
@@ -133,7 +135,7 @@ test("runs a permitted tool and restores its Pi transcript after restart", {
     await stopAgent(first);
     first = undefined;
 
-    second = startAgent(agentDir, baseUrl);
+    second = startAgent(agentDir, join(root, "data"), baseUrl);
     await second.connection.agent.request(acp.methods.agent.initialize, {
       protocolVersion: acp.PROTOCOL_VERSION,
     });
@@ -229,7 +231,7 @@ test("surfaces an upstream model error through ACP", { timeout: 30_000 }, async 
       server.listen(0, "127.0.0.1", resolve);
     });
     const port = (server.address() as AddressInfo).port;
-    agent = startAgent(agentDir, `http://127.0.0.1:${port}/v1`);
+    agent = startAgent(agentDir, join(root, "data"), `http://127.0.0.1:${port}/v1`);
     await agent.connection.agent.request(acp.methods.agent.initialize, {
       protocolVersion: acp.PROTOCOL_VERSION,
     });
@@ -320,7 +322,7 @@ test("enforces real read targets through the compiled Pi tool path", {
       server.listen(0, "127.0.0.1", resolve);
     });
     const port = (server.address() as AddressInfo).port;
-    agent = startAgent(agentDir, `http://127.0.0.1:${port}/v1`);
+    agent = startAgent(agentDir, join(root, "data"), `http://127.0.0.1:${port}/v1`);
     await agent.connection.agent.request(acp.methods.agent.initialize, {
       protocolVersion: acp.PROTOCOL_VERSION,
     });
@@ -423,7 +425,7 @@ test("uses VibeAround MCP tools over the ACP connection", {
       server.listen(0, "127.0.0.1", resolve);
     });
     const port = (server.address() as AddressInfo).port;
-    agent = startAgent(agentDir, `http://127.0.0.1:${port}/v1`);
+    agent = startAgent(agentDir, join(root, "data"), `http://127.0.0.1:${port}/v1`);
 
     const initialized = await agent.connection.agent.request(
       acp.methods.agent.initialize,
@@ -459,6 +461,12 @@ test("uses VibeAround MCP tools over the ACP connection", {
     );
     assert.equal(result.stopReason, "end_turn");
     assert.equal(agentText(agent.updates), "mcp complete");
+
+    // Pi's system prompt goes out with our identity sentence swapped in. If a
+    // Pi upgrade rewords the anchor, this is where it shows.
+    const firstRequest = JSON.stringify(requests[0]);
+    assert.ok(firstRequest.includes(VA_IDENTITY_SENTENCE), firstRequest.slice(0, 400));
+    assert.ok(!firstRequest.includes(PI_IDENTITY_SENTENCE));
 
     // Only the VibeAround tool asked for permission; the built-in session
     // tool is auto-allowed.
@@ -540,13 +548,14 @@ function toolOutputs(request: unknown): Map<string, string> {
   return outputs;
 }
 
-function startAgent(agentDir: string, baseUrl: string): AgentHandle {
+function startAgent(agentDir: string, dataDir: string, baseUrl: string): AgentHandle {
   const binary = process.env.VA_AGENT_TEST_BINARY?.trim();
   const child = spawn(binary || process.execPath, binary ? [] : ["src/main.ts"], {
     cwd: process.cwd(),
     env: {
       ...process.env,
       VIBEAROUND_AGENT_DIR: agentDir,
+      VIBEAROUND_DATA_DIR: dataDir,
       VIBEAROUND_MODEL_API_KEY: "test-key",
       VIBEAROUND_MODEL_CONFIG: JSON.stringify({
         api: "openai-responses",

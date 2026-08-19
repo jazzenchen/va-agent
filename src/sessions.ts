@@ -2,7 +2,6 @@ import { closeSync, openSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import {
-  dirname,
   isAbsolute,
   join,
   relative,
@@ -27,6 +26,7 @@ import type {
   StopReason,
 } from "@agentclientprotocol/sdk";
 
+import { identityExtension } from "./identity.ts";
 import {
   mcpOverAcpExtension,
   sessionIdToolExtension,
@@ -55,7 +55,11 @@ export interface SessionLike {
   history(): SessionUpdate[];
   prompt(text: string): Promise<void>;
   abort(): Promise<void>;
+  /// Release local resources only (process exit).
   dispose(): void;
+  /// Disconnect from VibeAround's MCP server and then dispose; used when a
+  /// session is replaced in-process and the ACP connection is still live.
+  close(): Promise<void>;
 }
 
 export interface ToolCallRequest {
@@ -99,6 +103,7 @@ type PromptOutcome =
 
 export function createPiSessionFactory(
   agentDir: string,
+  dataDir: string,
   modelRuntime: ModelRuntime,
   model: NonNullable<CreateAgentSessionOptions["model"]>,
 ): SessionFactory {
@@ -117,7 +122,8 @@ export function createPiSessionFactory(
       agentDir,
       noExtensions: true,
       extensionFactories: [
-        permissionExtension(cwd, agentDir, beforeToolCall),
+        identityExtension(),
+        permissionExtension(cwd, dataDir, beforeToolCall),
         sessionIdToolExtension(extensionTools),
         vibearoundMcp.factory,
       ],
@@ -192,23 +198,22 @@ function adaptPiSession(
     history: () => historyToSessionUpdates(session.sessionManager.getBranch()),
     prompt: (text) => session.prompt(text),
     abort: () => session.abort(),
-    dispose: () => {
+    dispose: () => session.dispose(),
+    close: async () => {
+      await vibearoundMcp.disconnect();
       session.dispose();
-      // Best effort: when a session is replaced in-process the connection is
-      // live and this lands; at process exit the pipe may already be gone.
-      void vibearoundMcp.disconnect().catch(() => undefined);
     },
   };
 }
 
 function permissionExtension(
   cwd: string,
-  agentDir: string,
+  dataDir: string,
   beforeToolCall: BeforeToolCall,
 ): ExtensionFactory {
   return (pi) => {
     pi.on("tool_call", async (event, context) => {
-      const access = await toolAccess(event.toolName, event.input, cwd, agentDir);
+      const access = await toolAccess(event.toolName, event.input, cwd, dataDir);
       if (access === "deny") {
         return {
           block: true,
@@ -234,7 +239,7 @@ export async function toolAccess(
   toolName: string,
   args: unknown,
   cwd: string,
-  agentDir: string,
+  dataDir: string,
 ): Promise<ToolAccess> {
   if (AUTO_ALLOW_TOOLS.has(toolName)) {
     return "auto_allow";
@@ -252,17 +257,16 @@ export async function toolAccess(
     return "permission";
   }
 
-  const resolvedAgentDir = resolve(agentDir);
-  const resolvedDataDir = dirname(dirname(resolvedAgentDir));
-  const resolvedWorkspacesDir = join(resolvedDataDir, "workspaces");
-  if (isProtectedDataPath(target, resolvedDataDir, resolvedWorkspacesDir)) {
+  // VibeAround's data dir (settings, auth files, ...) is never readable
+  // without a prompt, except the workspaces it manages underneath.
+  const resolvedDataDir = resolve(dataDir);
+  if (isProtectedDataPath(target, resolvedDataDir, join(resolvedDataDir, "workspaces"))) {
     return "deny";
   }
 
-  const canonicalAgentDir = await realpath(agentDir).catch(() => resolvedAgentDir);
-  const dataDir = dirname(dirname(canonicalAgentDir));
-  const workspacesDir = join(dataDir, "workspaces");
-  if (isProtectedDataPath(target, dataDir, workspacesDir)) {
+  const canonicalDataDir = await realpath(dataDir).catch(() => resolvedDataDir);
+  const workspacesDir = join(canonicalDataDir, "workspaces");
+  if (isProtectedDataPath(target, canonicalDataDir, workspacesDir)) {
     return "deny";
   }
 
@@ -270,7 +274,7 @@ export async function toolAccess(
   if (!canonicalTarget) {
     return "permission";
   }
-  if (isProtectedDataPath(canonicalTarget, dataDir, workspacesDir)) {
+  if (isProtectedDataPath(canonicalTarget, canonicalDataDir, workspacesDir)) {
     return "deny";
   }
 
@@ -412,7 +416,7 @@ export class Sessions {
   ): Promise<string> {
     const bridge = new PromptBridge(requestPermission);
     const session = await this.#factory.create(cwd, bridge.beforeToolCall, mcp);
-    this.#set(session, bridge);
+    await this.#set(session, bridge);
     return session.sessionId;
   }
 
@@ -429,7 +433,7 @@ export class Sessions {
       bridge.beforeToolCall,
       mcp,
     );
-    this.#set(session, bridge);
+    await this.#set(session, bridge);
   }
 
   async load(
@@ -446,14 +450,14 @@ export class Sessions {
       bridge.beforeToolCall,
       mcp,
     );
-    this.#set(session, bridge);
+    await this.#set(session, bridge);
     for (const update of session.history()) {
       await notify(update);
     }
   }
 
-  #set(session: SessionLike, bridge: PromptBridge): void {
-    this.#records.get(session.sessionId)?.session.dispose();
+  async #set(session: SessionLike, bridge: PromptBridge): Promise<void> {
+    await this.#records.get(session.sessionId)?.session.close();
     this.#records.set(session.sessionId, {
       session,
       bridge,

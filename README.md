@@ -14,7 +14,8 @@ the client UI; this agent owns Pi sessions, model requests, and coding tools.
 
 ```sh
 npm ci
-VIBEAROUND_AGENT_DIR=/path/to/data \
+VIBEAROUND_AGENT_DIR=/path/to/vibearound-data/agents/va-agent \
+VIBEAROUND_DATA_DIR=/path/to/vibearound-data \
 VIBEAROUND_MODEL_CONFIG='{"api":"openai-responses","baseUrl":"https://api.openai.com/v1","model":"model-id","provider":"openai"}' \
 VIBEAROUND_MODEL_API_KEY=provider-api-key \
 npm start
@@ -59,6 +60,10 @@ blocked before execution until the ACP client selects `allow-once`; the
 built-in `get_session_id` needs no prompt. A rejected, cancelled, or failed
 permission request stays blocked. Project and user Pi extensions are disabled,
 so they cannot add executable tools outside this fixed set.
+
+`VIBEAROUND_DATA_DIR` is VibeAround's data directory; reads under it are
+refused except inside its managed `workspaces`. The system prompt is Pi's own
+with the opening identity sentence replaced ("You are VibeAround Agent, ...").
 
 Pi transcripts are stored under `$VIBEAROUND_AGENT_DIR/sessions`. A new
 session header is persisted before `session/new` returns, so it remains
