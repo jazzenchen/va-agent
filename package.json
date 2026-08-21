@@ -3,6 +3,10 @@
   "version": "0.1.1",
   "description": "VibeAround Agent — the built-in ACP coding agent for VibeAround",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jazzenchen/va-agent.git"
+  },
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
