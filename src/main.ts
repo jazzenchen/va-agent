@@ -13,6 +13,10 @@ import { acpMcpTransport, type McpBinding } from "./mcp-over-acp.ts";
 import { toolKind } from "./pi-acp-bridge.ts";
 import { createPiSessionFactory, Sessions } from "./sessions.ts";
 
+// Injected by the npm build; running from source (`npm start`) has no define.
+const AGENT_VERSION =
+  typeof __VA_AGENT_VERSION__ === "string" ? __VA_AGENT_VERSION__ : "0.0.0-dev";
+
 const agentDir = process.env.VIBEAROUND_AGENT_DIR?.trim();
 if (!agentDir) {
   console.error("VIBEAROUND_AGENT_DIR is required");
@@ -89,7 +93,7 @@ const app = acp
     agentInfo: {
       name: "va-agent",
       title: "VibeAround Agent",
-      version: "0.0.0",
+      version: AGENT_VERSION,
     },
   }))
   .onRequest(acp.methods.agent.session.new, async ({ params, client }) => {
